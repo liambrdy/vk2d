@@ -24,6 +24,11 @@ std::vector<float> unitSquare = {
     0.0f, 1.0f
 };
 
+#define LINE_VERTEX_COUNT 2
+std::vector<float> unitLine = {
+    0.0f, 0.0f, 1.0f, 0.0f
+};
+
 VkBool32 VKAPI_PTR DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData, void *pUserData)
 {
     printf("%s\n", pCallbackData->pMessage);
@@ -145,6 +150,8 @@ static bool IsDeviceSuitable(VkPhysicalDevice device)
 
 RendererResult RendererInit()
 {
+    ZoneScopedN("Engine initialization");
+
     if (renderer.initialized)
         return ResultUnknown;
 
@@ -351,6 +358,10 @@ RendererResult RendererInit()
         vkDestroyCommandPool(renderer.device, renderer.commandPool, nullptr);
     });
 
+    VkCommandBuffer tracyCmdBuf = std::move(AllocateCommandBuffers(1)[0]);
+
+    renderer.ctx = TracyVkContext(renderer.physicalDevice, renderer.device, renderer.queue, tracyCmdBuf);
+
     std::vector<VkDescriptorPoolSize> sizes = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 5 },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 5 }
@@ -380,9 +391,13 @@ RendererResult RendererInit()
 
     uint32_t vertexSize = (uint32_t)unitSquare.size() * sizeof(float);
     CreateBuffer(&renderer.quadVertexBuffer, vertexSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+    vertexSize = (uint32_t)unitSquare.size() * sizeof(float);
+    CreateBuffer(&renderer.lineVertexBuffer, vertexSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     
     renderer.deletionQueue.push_back([&]()
     {
+        DestroyBuffer(&renderer.lineVertexBuffer);
         DestroyBuffer(&renderer.quadVertexBuffer);
     });
 
@@ -390,16 +405,21 @@ RendererResult RendererInit()
     memcpy(mem, unitSquare.data(), renderer.quadVertexBuffer.size);
     UnmapBufferMemory(&renderer.quadVertexBuffer);
 
-    VkAttachmentDescription colorAttachment = {};
-    colorAttachment.flags = 0;
-    colorAttachment.format = renderer.swapchain.imageFormat;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    mem = MapBufferMemory(&renderer.lineVertexBuffer);
+    memcpy(mem, unitLine.data(), renderer.lineVertexBuffer.size);
+    UnmapBufferMemory(&renderer.lineVertexBuffer);
+
+    // Default render pass initialization
+    std::vector<VkAttachmentDescription> attachments(1);
+    attachments[0].flags = 0;
+    attachments[0].format = renderer.swapchain.imageFormat;
+    attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentReference colorAttachmentRef = {};
     colorAttachmentRef.attachment = 0;
@@ -430,7 +450,7 @@ RendererResult RendererInit()
     renderpassInfo.pNext = nullptr;
     renderpassInfo.flags = 0;
     renderpassInfo.attachmentCount = 1;
-    renderpassInfo.pAttachments = &colorAttachment;
+    renderpassInfo.pAttachments = attachments.data();
     renderpassInfo.subpassCount = 1;
     renderpassInfo.pSubpasses = &subpass;
     renderpassInfo.dependencyCount = 1;
@@ -438,8 +458,24 @@ RendererResult RendererInit()
 
     vkCreateRenderPass(renderer.device, &renderpassInfo, nullptr, &renderer.renderPass);
 
+    // Render to texture render pass initialization
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+    vkCreateRenderPass(renderer.device, &renderpassInfo, nullptr, &renderer.toTexturePass);
+
+    // Switch to this renderpass after rendering to texture
+    attachments[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+    vkCreateRenderPass(renderer.device, &renderpassInfo, nullptr, &renderer.midRenderPass);
+
     renderer.deletionQueue.push_back([=]()
     {
+        vkDestroyRenderPass(renderer.device, renderer.midRenderPass, nullptr);
+        vkDestroyRenderPass(renderer.device, renderer.toTexturePass, nullptr);
         vkDestroyRenderPass(renderer.device, renderer.renderPass, nullptr);
     });
 
@@ -483,7 +519,7 @@ RendererResult RendererInit()
         Shader shader = {};
         CreateShader(&shader, "../../../res/shaders/texture.vert", "../../../res/shaders/texture.frag");
 
-        CreateGraphicsPipeline(&renderer.texturePipeline, &shader);
+        CreateGraphicsPipeline(&renderer.texturePipeline, &shader, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 
         DestroyShader(&shader);
     }
@@ -492,14 +528,16 @@ RendererResult RendererInit()
         Shader shader = {};
         CreateShader(&shader, "../../../res/shaders/color.vert", "../../../res/shaders/color.frag");
 
-        CreateGraphicsPipeline(&renderer.colorPipeline, &shader);
+        CreateGraphicsPipeline(&renderer.colorQuadPipeline, &shader, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        CreateGraphicsPipeline(&renderer.linePipeline, &shader, VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
 
         DestroyShader(&shader);
     }
 
     renderer.deletionQueue.push_back([=]()
     {
-        DestroyGraphicsPipeline(&renderer.colorPipeline);
+        DestroyGraphicsPipeline(&renderer.linePipeline);
+        DestroyGraphicsPipeline(&renderer.colorQuadPipeline);
         DestroyGraphicsPipeline(&renderer.texturePipeline);
         vkDestroyPipelineCache(renderer.device, renderer.cache, nullptr);
     });
@@ -520,7 +558,7 @@ RendererResult RendererInit()
         frame.renderFinishedSemaphore = CreateSemaphore();
 
         frame.commandBuffer = std::move(AllocateCommandBuffers(1)[0]);
-        frame.frameUBO = std::move(AllocateDescriptorSets(&renderer.colorPipeline, 1, 0)[0]);
+        frame.frameUBO = std::move(AllocateDescriptorSets(&renderer.colorQuadPipeline, 1, 0)[0]);
         CreateBuffer(&frame.frameBuffer, sizeof(projection), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, false);
 
         void *mem = MapBufferMemory(&frame.frameBuffer);
@@ -567,6 +605,8 @@ void RendererShutdown()
     renderer.deletionQueue.clear();
 
     vmaDestroyAllocator(renderer.allocator);
+
+    TracyVkDestroy(renderer.ctx);
 
     vkDestroySurfaceKHR(renderer.instance, renderer.surface, nullptr);
 
@@ -620,7 +660,11 @@ static void RecreateSwapchain()
 
 void RendererBeginFrame()
 {
+    ZoneScopedN("RendererBeginFrame");
+
     FrameResources &frame = renderer.frames[renderer.frameIndex];
+
+    renderer.currentTarget = RENDER_TO_SCREEN;
 
     renderer.lastPipeline = nullptr;
     renderer.lastBuffer = nullptr;
@@ -642,7 +686,7 @@ void RendererBeginFrame()
     VkCheck(vkBeginCommandBuffer(frame.commandBuffer, &cmdBeginInfo));
 
     VkClearValue clearValue = {};
-    clearValue.color = { 0.1f, 0.1f, 0.1f };
+    clearValue.color = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     VkRenderPassBeginInfo beginInfo = {};
     beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -659,9 +703,13 @@ void RendererBeginFrame()
 
 void RendererEndFrame()
 {
+    ZoneScopedN("RendererEndFrame");
+
     FrameResources &frame = renderer.frames[renderer.frameIndex];
 
     vkCmdEndRenderPass(frame.commandBuffer);
+
+    TracyVkCollect(renderer.ctx, frame.commandBuffer);
 
     VkCheck(vkEndCommandBuffer(frame.commandBuffer));
 
@@ -749,12 +797,14 @@ static void BackendRender(std::vector<VkDescriptorSet> sets, uint32_t vertexCoun
 void RenderQuad(glm::vec4 rect, glm::vec4 color)
 {
     FrameResources &frame = renderer.frames[renderer.frameIndex];
+    
+    TracyVkZone(renderer.ctx, frame.commandBuffer, "RenderQuad");
 
     std::vector<VkDescriptorSet> sets = {
         frame.frameUBO
     };
 
-    BackendRender(sets, QUAD_VERTEX_COUNT, &renderer.quadVertexBuffer, &renderer.colorPipeline, { rect.x, rect.y }, { rect.z, rect.w }, {}, color);
+    BackendRender(sets, QUAD_VERTEX_COUNT, &renderer.quadVertexBuffer, &renderer.colorQuadPipeline, { rect.x, rect.y }, { rect.z, rect.w }, {}, color);
 }
 
 void RenderTexture(Texture *handle, glm::vec4 rect, glm::vec4 texCoord, glm::vec4 color)
@@ -762,6 +812,8 @@ void RenderTexture(Texture *handle, glm::vec4 rect, glm::vec4 texCoord, glm::vec
     _Texture *texture = (_Texture *)handle;
 
     FrameResources &frame = renderer.frames[renderer.frameIndex];
+
+    TracyVkZone(renderer.ctx, frame.commandBuffer, "RenderTexture");
 
     std::vector<VkDescriptorSet> sets = {
         frame.frameUBO,
@@ -771,4 +823,101 @@ void RenderTexture(Texture *handle, glm::vec4 rect, glm::vec4 texCoord, glm::vec
     glm::vec4 coord = texCoord;
 
     BackendRender(sets, QUAD_VERTEX_COUNT, &renderer.quadVertexBuffer, &renderer.texturePipeline, { rect.x, rect.y }, { rect.z, rect.w }, coord, color);
+}
+
+void RenderLine(glm::vec2 pos, glm::vec2 size, glm::vec4 color)
+{
+    FrameResources &frame = renderer.frames[renderer.frameIndex];
+
+    std::vector<VkDescriptorSet> sets = {
+        frame.frameUBO
+    };
+
+    BackendRender(sets, LINE_VERTEX_COUNT, &renderer.lineVertexBuffer, &renderer.linePipeline, pos, size, {}, color);
+}
+
+static void TransitionTargetImageLayout(_Texture *texture, VkImageLayout oldLayout, VkImageLayout newLayout)
+{
+    FrameResources &frame = renderer.frames[renderer.frameIndex];
+
+    VkImageMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = texture->image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    
+    VkPipelineStageFlags sourceStage;
+    VkPipelineStageFlags destStage;
+
+    if (oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    {
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        sourceStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        destStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+    {
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        destStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+
+    vkCmdPipelineBarrier(frame.commandBuffer, sourceStage, destStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+void SetRenderTarget(Texture *texture)
+{
+    if (renderer.currentTarget == texture)
+        return;
+
+    FrameResources &frame = renderer.frames[renderer.frameIndex];
+
+    vkCmdEndRenderPass(frame.commandBuffer);
+
+    _Texture *tex = (_Texture *)texture;
+    bool isScreen = texture == RENDER_TO_SCREEN;
+    
+    if (isScreen)
+    {
+        TransitionTargetImageLayout((_Texture *)renderer.currentTarget, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    else
+    {
+        TransitionTargetImageLayout(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
+
+    VkRenderPass currentPass = isScreen ? renderer.midRenderPass : renderer.toTexturePass;
+    VkExtent2D extent = {};
+    if (isScreen)
+        extent = renderer.swapchain.extent;
+    else
+        extent = { tex->width, tex->height };
+
+    VkClearValue clearValue = {};
+    clearValue.color = { 1.0f, 0.0f, 0.0f, 1.0f };
+
+    VkRenderPassBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    beginInfo.pNext = nullptr;
+    beginInfo.renderPass = currentPass;
+    beginInfo.framebuffer = isScreen ? renderer.framebuffers[renderer.currentImage] : tex->framebuffer;
+    beginInfo.renderArea.extent = extent;
+    beginInfo.renderArea.offset = { 0, 0 };
+    beginInfo.clearValueCount = 1;
+    beginInfo.pClearValues = &clearValue;
+
+    vkCmdBeginRenderPass(frame.commandBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    renderer.currentTarget = texture;
 }

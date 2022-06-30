@@ -12,6 +12,7 @@ struct _Texture
 
     VkImageView view;
     VkSampler sampler;
+    VkFramebuffer framebuffer;
 
     VkDescriptorSet set;
 
@@ -19,4 +20,4 @@ struct _Texture
     VkFormat format;
 };
 
-void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat format, uint8_t *pixels);
+void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat format, uint8_t *pixels, VkImageUsageFlags usage);

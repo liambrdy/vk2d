@@ -6,7 +6,34 @@
 
 #include <stb_image.h>
 
-Texture *CreateTexture(uint32_t width, uint32_t height, uint8_t *pixels)
+Texture *CreateTexture(uint32_t width, uint32_t height)
+{
+    _Texture *texture = (_Texture *)calloc(1, sizeof(_Texture));
+
+    texture->width = width;
+    texture->height = height;
+
+    texture->format = VK_FORMAT_R8G8B8A8_SRGB;
+
+    _CreateTexture(texture, width, height, texture->format, nullptr, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+
+    VkFramebufferCreateInfo fboInfo = {};
+    fboInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fboInfo.pNext = nullptr;
+    fboInfo.flags = 0;
+    fboInfo.renderPass = renderer.toTexturePass;
+    fboInfo.attachmentCount = 1;
+    fboInfo.pAttachments = &texture->view;
+    fboInfo.width = width;
+    fboInfo.height = height;
+    fboInfo.layers = 1;
+
+    vkCreateFramebuffer(renderer.device, &fboInfo, nullptr, &texture->framebuffer);
+
+    return (Texture *)texture;
+}
+
+Texture *LoadTextureFromPixels(uint32_t width, uint32_t height, uint8_t *pixels)
 {
     _Texture *texture = (_Texture *)calloc(1, sizeof(_Texture));
 
@@ -15,7 +42,9 @@ Texture *CreateTexture(uint32_t width, uint32_t height, uint8_t *pixels)
     
     texture->format = VK_FORMAT_R8G8B8A8_SRGB;
 
-    _CreateTexture(texture, width, height, texture->format, pixels);
+    _CreateTexture(texture, width, height, texture->format, pixels, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    texture->framebuffer = VK_NULL_HANDLE;
 
     return (Texture *)texture;
 }
@@ -38,7 +67,9 @@ Texture *LoadTextureFromFile(const char *filename)
     
     texture->format = VK_FORMAT_R8G8B8A8_SRGB;
 
-    _CreateTexture(texture, texture->width, texture->height, texture->format, pixels);
+    _CreateTexture(texture, texture->width, texture->height, texture->format, pixels, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    texture->framebuffer = VK_NULL_HANDLE;
 
     stbi_image_free(pixels);
 
@@ -53,63 +84,24 @@ void DestroyTexture(Texture *handle)
     vmaDestroyImage(renderer.allocator, texture->image, texture->allocation);
     vkDestroyImageView(renderer.device, texture->view, nullptr);
     vkDestroySampler(renderer.device, texture->sampler, nullptr);
+
+    if (texture->framebuffer != VK_NULL_HANDLE)
+        vkDestroyFramebuffer(renderer.device, texture->framebuffer, nullptr);
 }
 
-static void TransitionImageLayout(_Texture *texture, VkImageLayout oldLayout, VkImageLayout newLayout)
+void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat format, uint8_t *pixels, VkImageUsageFlags usage)
 {
-    VkCommandBuffer cmdBuffer = BeginSingleUseCommand();
-
-    VkImageMemoryBarrier barrier = {};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = texture->image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-
-    VkPipelineStageFlags sourceStage;
-    VkPipelineStageFlags destStage;
-
-    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) 
-    {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            destStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    }
-    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) 
-    {
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            destStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    }
-
-    vkCmdPipelineBarrier(cmdBuffer, sourceStage, destStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-    EndSingleUseCommand(cmdBuffer);
-}
-
-void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat format, uint8_t *pixels)
-{
-    VkImageFormatProperties props = {};
-    VkResult res = vkGetPhysicalDeviceImageFormatProperties(renderer.physicalDevice, VK_FORMAT_R8G8B8_SRGB, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &props);
-
     uint32_t formatMultiplier = format == VK_FORMAT_R8G8B8A8_SRGB ? 4 : 3;
 
     Buffer stagingBuffer = {};
-    CreateBuffer(&stagingBuffer, width * height * formatMultiplier, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    if (pixels != nullptr)
+    {
+        CreateBuffer(&stagingBuffer, width * height * formatMultiplier, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 
-    void *mem = MapBufferMemory(&stagingBuffer);
-    memcpy(mem, pixels, width * height * formatMultiplier);
-    UnmapBufferMemory(&stagingBuffer);
+        void *mem = MapBufferMemory(&stagingBuffer);
+        memcpy(mem, pixels, width * height * formatMultiplier);
+        UnmapBufferMemory(&stagingBuffer);
+    }
 
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -122,7 +114,7 @@ void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.usage = usage;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.queueFamilyIndexCount = 0;
     imageInfo.pQueueFamilyIndices = nullptr;
@@ -174,30 +166,37 @@ void _CreateTexture(_Texture *texture, uint32_t width, uint32_t height, VkFormat
 
     VkCheck(vkCreateSampler(renderer.device, &samplerInfo, nullptr, &texture->sampler));
 
-    TransitionImageLayout(texture, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (pixels != nullptr)
+    {
+        TransitionImageLayout(texture, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    VkCommandBuffer cmdBuffer = BeginSingleUseCommand();
+        VkCommandBuffer cmdBuffer = BeginSingleUseCommand();
 
-    VkBufferImageCopy region = {};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
+        VkBufferImageCopy region = {};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
 
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.mipLevel = 0;
 
-    region.imageOffset = { 0, 0, 0 };
-    region.imageExtent = { width, height, 1 };
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { width, height, 1 };
 
-    vkCmdCopyBufferToImage(cmdBuffer, stagingBuffer.buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkCmdCopyBufferToImage(cmdBuffer, stagingBuffer.buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-    EndSingleUseCommand(cmdBuffer);
+        EndSingleUseCommand(cmdBuffer);
 
-    TransitionImageLayout(texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        TransitionImageLayout(texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    vmaDestroyBuffer(renderer.allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+        vmaDestroyBuffer(renderer.allocator, stagingBuffer.buffer, stagingBuffer.allocation);
+    }
+    else
+    {
+        TransitionImageLayout(texture, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 
     texture->set = std::move(AllocateDescriptorSets(&renderer.texturePipeline, 1, 1)[0]);
 

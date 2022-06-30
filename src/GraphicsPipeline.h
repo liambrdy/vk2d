@@ -12,5 +12,5 @@ struct GraphicsPipeline
     std::vector<VkDescriptorSetLayout> setLayouts;
 };
 
-void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader);
+void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader, VkPrimitiveTopology topology);
 void DestroyGraphicsPipeline(GraphicsPipeline *pipeline);

@@ -19,6 +19,9 @@
 
 #include "Renderer.h"
 
+#include "Tracy.hpp"
+#include "TracyVulkan.hpp"
+
 struct FrameResources
 {
     VkSemaphore imageAvailableSemaphore;
@@ -61,20 +64,28 @@ struct Renderer
     _Window *currentWindow;
     VkSurfaceKHR surface;
 
-    Swapchain swapchain;
     VkRenderPass renderPass;
+    VkRenderPass toTexturePass;
+    VkRenderPass midRenderPass;
+    
+    Swapchain swapchain;
     std::vector<FrameResources> frames;
     std::vector<VkFramebuffer> framebuffers;
     uint32_t frameIndex;
     uint32_t currentImage;
 
+    Texture *currentTarget;
+
     VkPipelineCache cache;
     GraphicsPipeline texturePipeline;
-    GraphicsPipeline colorPipeline;
+    GraphicsPipeline colorQuadPipeline;
+    GraphicsPipeline linePipeline;
 
     VmaAllocator allocator;
+    TracyVkCtx ctx;
 
     Buffer quadVertexBuffer;
+    Buffer lineVertexBuffer;
 
     Buffer *lastBuffer;
     GraphicsPipeline *lastPipeline;
@@ -91,8 +102,7 @@ struct Renderer
 
     std::vector<const char *> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
-        VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME
+        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME
     };
 
     std::vector<const char *> layerNames = {

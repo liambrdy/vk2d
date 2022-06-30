@@ -4,6 +4,10 @@ project(vk2d
     VERSION 0.1.0
     LANGUAGES CXX)
 
+if (NOT ${CMAKE_BUILD_TYPE})
+    set(CMAKE_BUILD_TYPE "Debug" STRING CACHE "Set the build type to debug, release, minwithdebinfo" FORCE)
+endif()
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -17,7 +21,7 @@ set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
 
 add_subdirectory(${DEPS_DIR}/glm)
 add_subdirectory(${DEPS_DIR}/glslang)
-add_subdirectory(${DEPS_DIR}) # Imgui, spirv-reflect
+add_subdirectory(${DEPS_DIR}) # Imgui, spirv-reflect, tracy
 add_subdirectory(${DEPS_DIR}/stb)
 add_subdirectory(${DEPS_DIR}/vma)
 add_subdirectory(${DEPS_DIR}/volk)
@@ -26,6 +30,7 @@ file(GLOB SRCS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/*.cpp ${CMAKE_SOURCE_DI
 
 add_library(vk2d STATIC
     ${SRCS}
+    ${DEPS_DIR}/tracy/TracyClient.cpp
 )
 
 target_link_libraries(vk2d PUBLIC
@@ -41,6 +46,11 @@ target_link_libraries(vk2d PUBLIC
 
 target_include_directories(vk2d PUBLIC
     ${CMAKE_SOURCE_DIR}/src
+    ${DEPS_DIR}/tracy/
+)
+
+target_compile_definitions(vk2d PRIVATE
+    $<$<CONFIG:Debug>:TRACY_ENABLE>
 )
 
 add_executable(sandbox

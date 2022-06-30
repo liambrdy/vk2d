@@ -3,7 +3,7 @@
 #include "Internal.h"
 #include "Utils.h"
 
-void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader)
+void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader, VkPrimitiveTopology topology)
 {
     VkPipelineVertexInputStateCreateInfo vertexInputStage = {};
     vertexInputStage.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -17,7 +17,7 @@ void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader)
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {};
     inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAssemblyState.flags = 0;
-    inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssemblyState.topology = topology;
     inputAssemblyState.primitiveRestartEnable = VK_FALSE;
 
     VkPipelineViewportStateCreateInfo viewportState = {};
@@ -80,8 +80,7 @@ void CreateGraphicsPipeline(GraphicsPipeline *pipeline, Shader *shader)
 
     std::vector<VkDynamicState> states = {
         VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-        // VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY_EXT
+        VK_DYNAMIC_STATE_SCISSOR
     };
 
     VkPipelineDynamicStateCreateInfo dynamicState = {};
